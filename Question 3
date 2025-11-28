@@ -1,0 +1,149 @@
+library(tm)
+library(caret)
+library(e1071)
+library(klaR)
+library(dplyr)
+
+######## Load data 
+url <- "https://raw.githubusercontent.com/cardiffnlp/politics-and-virality-twitter/refs/heads/main/data/annotation/en/en_900.csv"
+dat <- read.csv(url, stringsAsFactors = FALSE, na.strings = c("", "NA"))
+
+colnames(dat)
+
+text_candidates <- c("text", "tweet", "content", "tweet_text", "full_text")
+text_col <- intersect(text_candidates, names(dat))
+if (length(text_col) == 0) {
+  text_col <- names(dat)[sapply(dat, is.character)][1]
+  message("No common text column found; using first character column: ", text_col)
+} else {
+  text_col <- text_col[1]
+}
+
+label_candidates <- c("annotation", "sentiment", "label", "y", "annotation_en", "sent")
+label_col <- intersect(label_candidates, names(dat))
+if (length(label_col) == 0) {
+  numcols <- names(dat)[sapply(dat, function(x) is.numeric(x) || is.integer(x))]
+  if (length(numcols) > 0) {
+    # choose the numeric column with lowest unique values > 1 (likely annotation)
+    uniq_counts <- sapply(dat[numcols], function(x) length(unique(na.omit(x))))
+    label_col <- numcols[which.min(uniq_counts)]
+    message("No standard label column found; using numeric candidate column: ", label_col)
+  } else {
+    stop("Could not auto-detect a text or label column. Please rename your CSV columns to include 'text' and 'annotation' (or similar).")
+  }
+} else {
+  label_col <- label_col[1]
+}
+
+message("Using text column: ", text_col, "and label column: ", label_col)
+
+####### Recode labels with +1 = "positive", remainder = "other"
+raw_labels <- dat[[label_col]]
+
+lab_char <- as.character(raw_labels)
+lab_char_stripped <- gsub("^\\s*\\+","", lab_char)
+suppressWarnings(lab_num <- as.numeric(lab_char_stripped))
+
+is_pos <- (!is.na(lab_num) & lab_num == 1) | (lab_char_stripped == "1") | (lab_char == "+1")
+is_pos <- is_pos | tolower(lab_char) %in% c("positive", "pos", "1", "+1")
+
+dat$target <- ifelse(is_pos, "positive", "other")
+dat$target[is.na(dat$target)] <- "other"
+dat$target <- factor(dat$target, levels = c("positive", "other"))
+
+text_col <- "full_text"
+label_col <- "label"
+
+raw_labels <- dat[label_col]
+dat$target <- ifelse(raw_labels == 1, "positive", "other")
+dat$target[is.na(dat$target)] <- "other"
+dat$target <- factor(dat$target, levels = c("positive", "other"))
+
+
+##### Create corpus and pre-process text 
+texts <- dat[[text_col]]
+texts[is.na(texts)] <- ""
+corpus <- VCorpus(VectorSource(texts))
+
+# preprocessing similar to your notes:
+corpus <- tm_map(corpus, content_transformer(function(x) iconv(x, from = "UTF-8", to = "ASCII", sub = "")))
+corpus <- tm_map(corpus, content_transformer(tolower))
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, removeNumbers)
+corpus <- tm_map(corpus, removeWords, stopwords("english"))
+corpus <- tm_map(corpus, stripWhitespace)
+# (Optional) you may also consider stemming if it was used in your notes:
+# library(SnowballC); corpus <- tm_map(corpus, stemDocument)
+
+###### Create DocumentTermMatrix and remove sparse terms
+dtm <- DocumentTermMatrix(corpus)
+# Remove sparse terms (adjust sparse threshold as appropriate)
+dtm_reduced <- removeSparseTerms(dtm, 0.995)# keep terms present in >= 0.5% of docs (tune as needed)
+
+# Convert to a data.frame of counts
+dtm_mat <- as.matrix(dtm_reduced)
+dtm_df <- as.data.frame(dtm_mat, stringsAsFactors = FALSE)
+
+# define df_features from the raw counts
+df_features <- dtm_df
+
+# Convert counts to factor "Yes"/"No" (presence/absence)
+convert_counts <- function(x) {
+  x <- ifelse(x > 0, "Yes", "No")
+  factor(x, levels = c("No", "Yes"))
+}
+dtm_factor <- as.data.frame(lapply(dtm_df, convert_counts))
+
+###### Combine features with target and split into train/test 
+data_all <- cbind(target = dat$target, dtm_factor)
+
+set.seed(7)
+train_index <- createDataPartition(data_all$target, p = 0.8, list = FALSE)
+train_data <- data_all[train_index, , drop = FALSE]
+test_data<- data_all[-train_index, , drop = FALSE]
+
+
+df_features_binary <- df_features %>%
+  mutate(across(everything(),
+                ~ factor(ifelse(. > 0, "Yes", "No"),
+                         levels = c("No", "Yes"))))
+
+##### Train cross-validated Naive Bayes via caret
+# 5-fold CV
+trctrl <- trainControl(method = "cv", number = 5, classProbs = FALSE)
+
+set.seed(7)
+nb_model <- train(
+  target ~ .,
+  data = train_data,
+  method = "nb", # Naive Bayes via klaR
+  trControl = trctrl,
+  tuneLength = 3
+)
+
+print(nb_model)
+
+######### Predict on test set and report confusion matrix & error rate 
+pred <- predict(nb_model, newdata = test_data)
+
+cm <- confusionMatrix(pred, test_data$target, positive = "positive")
+print(cm)
+
+####### Misclassification (error) rate:
+misclass_rate <- 1 - sum(diag(cm$table)) / sum(cm$table)
+cat(sprintf("Misclassification (error) rate: %.4f (%.2f%%)\n", misclass_rate, misclass_rate * 100))
+
+class_errors <- 1 - diag(cm$table) / rowSums(cm$table)
+print("Class-wise error rates (by true class):")
+print(class_errors)
+
+######## Description and analysis
+# My Naive Bayes model did not learn how to code for positive tweets and instead label every tweet as "other."
+# This created a misleading accuracy score (~52%) because over half the tweets were considered "other."
+# In other words, the only tweets it labeled properly were the "other" tweets because the code labeled every tweet in the raw data as "other," 
+# but did not actually register any sort of tweet pattern. 
+# So, while the model had a 100% success rate at accurately labeling "other" tweets, it had a 0% success rate in labeling "positive" tweets
+# Ultimately, this model cannot be deemed more reliable than guesswork
+# This coding flaw could have occurred for a number of reason like: the tweets being too heavily cleaned to remove punctuation, emojis or hashtags
+# and using a 'is this word present' model because tweets are short, meaning more words need to be considered and added for positive coding
+#The model used a standard 5 folds as the cross verification method.
