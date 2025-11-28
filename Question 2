@@ -54,4 +54,6 @@ knn_model <- train(
 #The target variable (violence_method) was converted to a factor to support multi-class classification.
 #The model preformance was assessed through a classic 10 fold cross-validation method to limit overfitting and provide a more reliable estimate of out-of-sample performance
 #Overall, the model performed reasonably well. It was able to predict some categories better than others with groups containing more data fairing better than groups with less data.
+#The majority of people fall into low-level violence, which is to be expected, and higher violent scores are rarer.
+# This is valuable because the model will struggle to predict these categories, leading to a failing cross-validation. 
 #Ultimately, the results suggest that age, education, and income provide meaningful information for predicting violent_method, although adding more features or using a different type of model could likely improve accuracy.
