@@ -1,0 +1,18 @@
+# Load necessary libraries
+library(ggplot2)
+
+# Load the dataset
+data_cl <- read.csv("https://raw.githubusercontent.com/babakrezaee/MethodsCourses/master/LeidenUniv_MAQM2020/Datasets/R%26P_RezaeeAsadzadeh_MethodsCourse.csv")
+
+# Basic Descriptive Statistics
+nrow(data_cl)                        # Number of observations
+summary(data_cl$Violent_method)      # Summary statistics for Violent_method
+# Kernel Density Plot for 'Violent_method'
+ggplot(data_cl, aes(x = Violent_method)) +
+  geom_density(kernel = "gaussian", fill = "darkred", alpha = 0.6, adjust = 1) +
+  labs(
+    title = "Kernel Density Estimation (KDE) of Violent Method",
+    x = "Violent Method",
+    y = "Density"
+  ) +
+  theme_minimal()
